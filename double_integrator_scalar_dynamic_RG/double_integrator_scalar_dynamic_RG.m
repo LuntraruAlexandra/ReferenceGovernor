@@ -2,7 +2,7 @@ clear;
 clc;
 close all;
 
-%% =========================================================
+%%
 % REFERENCES
 %
 % [1] E. G. Gilbert, K. T. Tan (1991)
@@ -33,7 +33,7 @@ close all;
 % Visualize 3D slices and their 2D contours.
 %
 % A dynamic scalar Reference Governor is implemented after the O_inf* computation.
-%% =========================================================
+%% 
 
 %% 1. DISCRETE-TIME DOUBLE-INTEGRATOR MODEL
 
@@ -296,137 +296,8 @@ inequalityTable = table( ...
 
 disp('Non-redundant inequalities:');
 disp(inequalityTable);
-%% 11. ADMISSIBLE REFERENCE INTERVAL
-% This part is not actually related to RG
-% Used this for the geometric representation of Oinf
-% Minimize the first reference component, then maximize it.
-% The plotting and RG example below assume a scalar reference (m = 1).
-referenceObjective = [1; zeros(n,1)];
-[~,minimumObjective,minExitFlag] = linprog( ...
-    referenceObjective,H,h,[],[],[],[],lpOptions);
-[~,maximumNegativeObjective,maxExitFlag] = linprog( ...
-    -referenceObjective,H,h,[],[],[],[],lpOptions);
-
-if minExitFlag ~= 1 || maxExitFlag ~= 1
-    error('Unable to compute the admissible reference bounds.');
-end
-
-vMin = minimumObjective;
-vMax = -maximumNegativeObjective;
-Oinf.vMin = vMin;
-Oinf.vMax = vMax;
-fprintf('\nAdmissible reference interval:\n');
-fprintf('[%.6f, %.6f]\n',vMin,vMax);
-
-%% 12. COMPUTE CROSS-SECTIONS OF O_INF*
-
-% The following geometry is intentionally specific to n=2, m=1.
-assert(n == 2 && m == 1, 'Cross-section plots require n=2, m=1.');
-
-% For fixed scalar v: H(:,1:m)*v + H(:,m+1:m+n)*x <= h.
-% Therefore, Hx*x <= hx defines a polygon in the (x1,x2) plane.
-numSlices = 20;
-endpointMargin = 1e-4;
-
-if vMax-vMin <= 2*endpointMargin
-    error('The admissible reference interval is too narrow.');
-end
-
-referenceValues = linspace(vMin+endpointMargin,vMax-endpointMargin,numSlices);
-slices = cell(numSlices,1);
-Hx = H(:,m+1:m+n);
-
-for sliceIndex = 1:numSlices
-    fixedReference = referenceValues(sliceIndex);
-    hx = h-H(:,1:m)*fixedReference;
-    vertices = [];
-
-    % Intersect every pair of boundary lines.
-    for rowA = 1:size(Hx,1)-1
-        for rowB = rowA+1:size(Hx,1)
-            lineMatrix = Hx([rowA rowB],:);
-            lineBounds = hx([rowA rowB]);
-
-            % Skip parallel or nearly parallel lines.
-            if rcond(lineMatrix) < 1e-11
-                continue;
-            end
-
-            candidateVertex = lineMatrix\lineBounds;
-
-            % Keep only intersections satisfying every inequality.
-            if all(Hx*candidateVertex <= hx+1e-7)
-                vertices = [vertices;candidateVertex']; %#ok<AGROW>
-            end
-        end
-    end
-
-    if size(vertices,1) < 3
-        continue;
-    end
-
-    % Remove duplicate vertices and order the convex boundary.
-    vertices = uniquetol(vertices,1e-7,'ByRows',true);
-    if size(vertices,1) < 3
-        continue;
-    end
-
-    hullIndices = convhull(vertices(:,1),vertices(:,2));
-    slices{sliceIndex} = vertices(hullIndices,:);
-end
-
-Oinf.referenceValues = referenceValues;
-Oinf.slices = slices;
-
-%% 13-14. PLOTTING IS COMBINED INTO ONE FIGURE AT THE END
-% The slice geometry is preserved; no intermediate figures are opened.
-colorMap = parula(numSlices);
-
-%% 15. NUMERICAL VERIFICATION OF SLICE VERTICES
-
-maximumViolation = -inf;
-for sliceIndex = 1:numSlices
-    sliceVertices = slices{sliceIndex};
-    if isempty(sliceVertices)
-        continue;
-    end
-
-    for vertexIndex = 1:size(sliceVertices,1)
-        augmentedState = [referenceValues(sliceIndex); ...
-                          sliceVertices(vertexIndex,:)'];
-        constraintViolation = max(H*augmentedState-h);
-        maximumViolation = max(maximumViolation,constraintViolation);
-    end
-end
-
-if isfinite(maximumViolation)
-    fprintf('\nMaximum constraint violation: %.3e\n',maximumViolation);
-else
-    warning('No valid cross-sections were generated.');
-end
-
-disp('O_inf* computation and slice visualization completed.');
-
-%% 16. CHECK GEOMETRIC BOUNDS OF THE SLICES
-
-allVertices = [];
-for sliceIndex = 1:numSlices
-    if ~isempty(slices{sliceIndex})
-        allVertices = [allVertices;slices{sliceIndex}]; %#ok<AGROW>
-    end
-end
-
-if ~isempty(allVertices)
-    fprintf('\nGeometric bounds of the slices:\n');
-    fprintf('x1: [%.8f, %.8f]\n', ...
-            min(allVertices(:,1)),max(allVertices(:,1)));
-    fprintf('x2: [%.8f, %.8f]\n', ...
-            min(allVertices(:,2)),max(allVertices(:,2)));
-    fprintf('Theoretical x1 bounds: [-1, 1]\n');
-    fprintf('Theoretical x2 bounds: [-0.1, 0.1]\n');
-else
-    warning('Geometric bounds cannot be checked: no slice vertices exist.');
-end
+[Oinf,vMin,vMax,numSlices,referenceValues,slices,colorMap] = ...
+    computeOinfVisualizationGeometry(Oinf,H,h,n,m,lpOptions);
 
 %% 17. DYNAMIC SCALAR REFERENCE GOVERNOR - [2], EQUATIONS (10)-(11)
 
@@ -546,191 +417,11 @@ Oinf.rg.kappaHistory = kappaHistory;
 % Mark with X the exact intersections with each plotted plane w = constant.
 % Intersections are linearly interpolated between consecutive RG samples.
 
-fig = figure('Color',[1 1 1], ...
-       'Name','Oinf slices and RG trajectory', ...
-       'NumberTitle','off','WindowStyle','normal', ...
-       'MenuBar','figure','ToolBar','figure', ...
-       'Position',[100 100 1150 750]);
-ax = gca;
-hold(ax,'on'); grid(ax,'on'); box(ax,'on');
-% Explicit light theme, independent of MATLAB dark-mode defaults.
-ax.Color = [1 1 1];
-ax.XColor = [0 0 0];
-ax.YColor = [0 0 0];
-ax.ZColor = [0 0 0];
-ax.GridColor = [0.65 0.65 0.65];
-ax.GridAlpha = 0.25;
-ax.Projection = 'perspective';
+Oinf = plotRGTrajectoryAndSlices(Oinf,slices,numSlices,referenceValues, ...
+    colorMap,augmentedHistory,simulationSteps,time,vMin,vMax,desiredReference);
 
-% Draw O_inf* cross-sections first, with low opacity.
-for sliceIndex = 1:numSlices
-    sliceVertices = slices{sliceIndex};
-    if isempty(sliceVertices)
-        continue;
-    end
-
-    fixedReference = referenceValues(sliceIndex);
-    fill3(sliceVertices(:,1),sliceVertices(:,2), ...
-          fixedReference*ones(size(sliceVertices,1),1), ...
-          colorMap(sliceIndex,:), ...
-          'FaceAlpha',0.18, ...
-          'EdgeColor',colorMap(sliceIndex,:), ...
-          'EdgeAlpha',0.45, ...
-          'LineWidth',0.8, ...
-          'HandleVisibility','off');
-end
-
-% Extract the augmented-state trajectory in the plot coordinate order.
-positionTrajectory = augmentedHistory(2,:);
-velocityTrajectory = augmentedHistory(3,:);
-referenceTrajectory = augmentedHistory(1,:);
-
-% Plot a single, clearly visible red trajectory.
-trajectoryHandle = plot3(positionTrajectory,velocityTrajectory, ...
-      referenceTrajectory,'-','Color',[0.85 0.08 0.08],'LineWidth',3, ...
-      'DisplayName','RG trajectory');
-
-% Compute intersections of each trajectory segment with each slice plane.
-intersectionPoints = zeros(0,3);
-intersectionTimes = zeros(0,1);
-intersectionPlane = zeros(0,1);
-intersectionTolerance = 1e-10;
-
-for sliceIndex = 1:numSlices
-    if isempty(slices{sliceIndex})
-        continue;
-    end
-    planeReference = referenceValues(sliceIndex);
-
-    for step = 1:simulationSteps
-        wA = referenceTrajectory(step);
-        wB = referenceTrajectory(step+1);
-
-        % Skip segments parallel to the plane, including segments in it.
-        if abs(wB-wA) <= intersectionTolerance
-            continue;
-        end
-
-        alpha = (planeReference-wA)/(wB-wA);
-        if alpha < -intersectionTolerance || alpha > 1+intersectionTolerance
-            continue;
-        end
-        alpha = max(0,min(1,alpha));
-
-        xCross = positionTrajectory(step) + alpha* ...
-                 (positionTrajectory(step+1)-positionTrajectory(step));
-        vCross = velocityTrajectory(step) + alpha* ...
-                 (velocityTrajectory(step+1)-velocityTrajectory(step));
-        tCross = time(step) + alpha*(time(step+1)-time(step));
-
-        candidate = [xCross vCross planeReference];
-        % Avoid duplicate intersections at trajectory vertices.
-        if ~isempty(intersectionPoints) && ...
-           any(vecnorm(intersectionPoints-candidate,2,2) < 1e-8)
-            continue;
-        end
-
-        intersectionPoints(end+1,:) = candidate; %#ok<AGROW>
-        intersectionTimes(end+1,1) = tCross; %#ok<AGROW>
-        intersectionPlane(end+1,1) = sliceIndex; %#ok<AGROW>
-    end
-end
-
-if ~isempty(intersectionPoints)
-    crossHandle = plot3(intersectionPoints(:,1),intersectionPoints(:,2), ...
-          intersectionPoints(:,3),'x', ...
-          'Color',[0 0 0], ...
-          'MarkerSize',11,'LineWidth',2.5, ...
-          'DisplayName','Trajectory / slice intersections');
-else
-    crossHandle = plot3(nan,nan,nan,'x', ...
-          'Color',[0 0 0], ...
-          'MarkerSize',11,'LineWidth',2.5, ...
-          'DisplayName','Trajectory / slice intersections');
-end
-
-startHandle = plot3(positionTrajectory(1),velocityTrajectory(1), ...
-      referenceTrajectory(1),'o','MarkerSize',9, ...
-      'MarkerFaceColor',[0.1 0.65 0.25], ...
-      'MarkerEdgeColor','k','DisplayName','Start');
-endHandle = plot3(positionTrajectory(end),velocityTrajectory(end), ...
-      referenceTrajectory(end),'o','MarkerSize',9, ...
-      'MarkerFaceColor',[0.95 0.6 0.05], ...
-      'MarkerEdgeColor','k','DisplayName','End');
-
-xlabel('x_1 - Position');
-ylabel('x_2 - Velocity');
-zlabel('w - Accepted reference');
-title('O_\infty^* cross-sections and RG trajectory');
-legend([trajectoryHandle crossHandle startHandle endHandle], ...
-       'Location','northeastoutside');
-view(38,23);
-xlim([-1.1 1.1]);
-ylim([-0.12 0.12]);
-zlim([vMin-0.05 vMax+0.05]);
-pbaspect([2 1 2]);
-% Use the standard MATLAB figure toolbar to rotate the 3D view.
-
-% Store intersection data for later analysis.
-Oinf.rg.intersectionPoints = intersectionPoints;
-Oinf.rg.intersectionTimes = intersectionTimes;
-Oinf.rg.intersectionPlaneIndex = intersectionPlane;
-
-fprintf('\nRG trajectory intersections with slice planes: %d\n', ...
-        size(intersectionPoints,1));
-if ~isempty(intersectionPoints)
-    intersectionTable = table(intersectionTimes,intersectionPoints(:,3), ...
-        intersectionPoints(:,1),intersectionPoints(:,2), ...
-        'VariableNames',{'Time','Reference','Position','Velocity'});
-    disp(intersectionTable);
-end
-%% LABEL START, END AND DESIRED REFERENCE
-
-% Start coordinates: (x1, x2, w)
-startPoint = [augmentedHistory(2,1), ...
-              augmentedHistory(3,1), ...
-              augmentedHistory(1,1)];
-
-% End coordinates: (x1, x2, w)
-endPoint = [augmentedHistory(2,end), ...
-            augmentedHistory(3,end), ...
-            augmentedHistory(1,end)];
-
-% Final desired reference
-rDesired = desiredReference(end);
-
-% Start label
-text(startPoint(1), startPoint(2), startPoint(3), ...
-    sprintf('(%.3f, %.3f, %.3f)', startPoint), ...
-    'FontSize', 10, ...
-    'FontWeight', 'bold', ...
-    'Color', [0 0.5 0], ...
-    'BackgroundColor', 'w', ...
-    'Margin', 3);
-
-% End label
-text(endPoint(1), endPoint(2), endPoint(3), ...
-    sprintf('(%.3f, %.3f, %.3f)', endPoint), ...
-    'FontSize', 10, ...
-    'FontWeight', 'bold', ...
-    'Color', [0.8 0.2 0], ...
-    'BackgroundColor', 'w', ...
-    'Margin', 3);
-
-% Desired reference label
-text(endPoint(1), endPoint(2), endPoint(3) + 0.08, ...
-    sprintf('r = %.3f', rDesired), ...
-    'FontSize', 10, ...
-    'FontWeight', 'bold', ...
-    'Color', 'b', ...
-    'BackgroundColor', 'w', ...
-    'Margin', 3);
-hold off
-
-
-%% =========================================================
+%%
 % 18. TIME EVOLUTION AND CONSTRAINT VERIFICATION
-%% =========================================================
 
 % Extract simulation data
 t = time;
@@ -741,99 +432,12 @@ x1 = augmentedHistory(2,:);
 x2 = augmentedHistory(3,:);
 u = outputHistory(3,:);
 
-% Create one figure with four subplots
-figure('Color','w', ...
-       'Name','RG - Time Evolution and Constraints', ...
-       'NumberTitle','off');
+plotRGTimeEvolution(t,r,w,x1,x2,u,stateMax,stateMin, ...
+    inputMax,inputMin,kappaHistory);
 
-tiledlayout(4,1,'TileSpacing','compact','Padding','compact');
-
-%% 1. Position and references
-nexttile;
-hold on; grid on; box on;
-
-plot(t,r,'g--','LineWidth',1.5);
-plot(t,w,'b','LineWidth',2);
-plot(t,x1,'r','LineWidth',2);
-
-yline(stateMax(1),'m--','LineWidth',1.2);
-yline(stateMin(1),'m--','LineWidth',1.2);
-
-ylabel('Position / Reference');
-title('Position Tracking');
-
-legend('Desired reference r', ...
-       'Accepted reference w', ...
-       'Position x_1', ...
-       'Position constraints', ...
-       'Location','best');
-
-xlim([t(1) t(end)]);
-
-%% 2. Velocity
-nexttile;
-hold on; grid on; box on;
-
-plot(t,x2,'b','LineWidth',2);
-
-yline(stateMax(2),'r--','LineWidth',1.3);
-yline(stateMin(2),'r--','LineWidth',1.3);
-
-ylabel('Velocity x_2');
-title('Velocity Constraint');
-
-legend('Velocity x_2', ...
-       'Maximum velocity', ...
-       'Minimum velocity', ...
-       'Location','best');
-
-xlim([t(1) t(end)]);
-
-%% 3. Command
-nexttile;
-hold on; grid on; box on;
-
-stairs(t,u,'b','LineWidth',1.8);
-
-yline(inputMax,'r--','LineWidth',1.3);
-yline(inputMin,'r--','LineWidth',1.3);
-
-ylabel('Control input u');
-title('Control Input Constraint');
-
-legend('Command u', ...
-       'Maximum input', ...
-       'Minimum input', ...
-       'Location','best');
-
-xlim([t(1) t(end)]);
-
-%% 4. Reference Governor parameter
-nexttile;
-hold on; grid on; box on;
-
-stairs(t(1:end-1),kappaHistory,'b','LineWidth',1.8);
-
-yline(1,'r--','LineWidth',1.2);
-yline(0,'r--','LineWidth',1.2);
-
-ylabel('\kappa(k)');
-xlabel('Time [s]');
-title('Reference Governor Parameter K');
-
-legend('\K(k)', ...
-       'Upper bound', ...
-       'Lower bound', ...
-       'Location','best');
-
-ylim([-0.05 1.05]);
-xlim([t(1) t(end)]);
-
-sgtitle('Dynamic Reference Governor - Time Evolution');
-
-%% =========================================================
+%%
 % NUMERICAL CONSTRAINT VERIFICATION
-%% =========================================================
+
 
 tol = 1e-7;
 
