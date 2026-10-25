@@ -51,11 +51,11 @@ Bd = [0;
 
 % u(k) = 0.9170*(v(k)-x1(k)) - 1.6821*x2(k)
 % Equivalently: u(k) = -K*x(k) + K(1)*v(k)
-K = [0.9170 1.6821];
+Kd = [0.9170 1.6821];
 
 % Closed-loop dynamics: x(k+1) = Ah*x(k) + Bh*v(k)
-Ah = Ad - Bd*K;
-Bh = Bd*K(1);
+Ah = Ad - Bd*Kd;
+Bh = Bd*Kd(1);
 
 % Dimensions inferred from the closed-loop model.
 % n: plant-state dimension; m: admissible-reference dimension.
@@ -67,7 +67,7 @@ assert(size(Bh,1) == n, 'Bh must have n rows.');
 
 closedLoopEigenvalues = eig(Ah);
 
-disp('Controller gain K from the paper:'); disp(K);
+disp('Controller gain K from the paper:'); disp(Kd);
 disp('Matrix Ah:'); disp(Ah);
 disp('Matrix Bh:'); disp(Bh);
 disp('Closed-loop eigenvalues:'); disp(closedLoopEigenvalues);
@@ -87,9 +87,9 @@ inputMax =  0.1;
 % Constrained output: y = [x1; x2; u] = Ch*x + Dh*v
 % y was chosen to contain all constraints
 Ch = [eye(n);
-      -K];
+      -Kd];
 Dh = [zeros(n,m);
-      K(1)];
+      Kd(1)];
 
 % p: number of constrained outputs (position, velocity, input).
 p = size(Ch,1);
@@ -146,17 +146,19 @@ if epsilon <= 0 || epsilon >= min(g)
     error('The selected epsilon is not admissible.');
 end
 
-% H0*v belongs to Y(epsilon): F*H0*v <= g-epsilon
-% See [2], equations (21)-(22).
-Hsteady = [F*H0 zeros(q,n)];
-hSteady = g - epsilon;
+
 
 %% 7. INITIALIZE O_0* - REFERENCES [1], [2]
 
+% H0*v belongs to Y(epsilon): F*H0*v <= g-epsilon
+% See [2], equations (21)-(22).
 % O_0* = {z : H0*v belongs to Y(epsilon), CG*z belongs to Y}
-H = [Hsteady;
+
+% f(CG*AGt *xG) = F*CG *(AGt* xG) - g <= 0
+% f([H0 0]xG) --> F*H0 *xG  - g <= -eps
+H = [F*H0 zeros(q,n);
      F*CG];
-h = [hSteady;
+h = [g - epsilon;
      g];
 % These matrices for writing the two inequalities in 21/22 from [2]
 % in a single inequality
@@ -305,7 +307,7 @@ disp(inequalityTable);
 % w(k) is the previously accepted reference; r(k) is the desired reference.
 % xG(k+1) = AG*xG(k) + BG*K(k)*(r(k)-w(k)).
 % y(k) = CG*xG(k) must satisfy F*y(k) <= g.
-% Choose the largest kappa in [0,1] such that xG(k+1) belongs to O_inf*.
+% Choose the largest K in [0,1] such that xG(k+1) belongs to O_inf*.
 % The plant evolves using w(k), not the newly computed w(k+1).
 
 BG = [eye(m); zeros(n,m)];
@@ -315,19 +317,14 @@ simulationDuration = 40;                 % seconds
 simulationSteps = round(simulationDuration/Ts);
 time = (0:simulationSteps)*Ts;
 
-% Desired position reference: zero initially, then a step to 0.8.
-% Change 0.8 to 1.2 to illustrate an inadmissible steady-state target.
+% Desired position reference: zero initially, then a step to 0.5
+% Change 0.5 to 1.2 to illustrate an inadmissible steady-state target
 desiredReference = zeros(1,simulationSteps+1);
-desiredReference(time >= 1) = 0.8;
+desiredReference(time >= 1) = 0.5;
 
 % Initial augmented state must belong to O_inf*.
-initialReference = 0;
-initialPlantState = zeros(n,1);
-xG = [initialReference; initialPlantState];
+xG = zeros(n+1,1);
 
-% This simulation and the 2D slice plots are for m = 1, n = 2.
-assert(m == 1 && n == 2, ...
-    'The plotting and scalar RG example require m=1 and n=2.');
 feasibilityTolerance = 1e-7;
 
 if any(H*xG > h+feasibilityTolerance)
@@ -336,81 +333,70 @@ end
 
 augmentedHistory = zeros(n+m,simulationSteps+1);
 outputHistory = zeros(p,simulationSteps+1);
-kappaHistory = zeros(1,simulationSteps);
-nextStateViolation = zeros(1,simulationSteps);
+KHistory = zeros(1,simulationSteps);
+nextStateCheck = zeros(1,simulationSteps);
 augmentedHistory(:,1) = xG;
 
 for step = 1:simulationSteps
     r = desiredReference(step);
-    w = xG(1);
-    referenceError = r-w;
+    w = [eye(m) zeros(m,n)] * xG;
+
+    % This is [I 0]*xG actually for this case
 
     % In the article's timing convention, y(k) uses the current w(k).
     outputHistory(:,step) = CG*xG;
 
-    % xG_next = baseNext + direction*kappa.
-    baseNext = AG*xG;
-    direction = BG*referenceError;
+    % xG_next = AG*xG + BG*K*(r-w)
 
-    % Enforce H*(baseNext + direction*kappa) <= h.
-    % Each row yields: coefficient_i*kappa <= margin_i.
-    coefficients = H*direction;
-    margins = h-H*baseNext;
-    kappaLower = 0;
-    kappaUpper = 1;
+    % Enforce H*(AG*xG + BG*K*(r-w)) <= h.
+    % Each row yields: coefficient_i*K <= margin_i.
+    coefficients = H*BG*(r-w);
+    margins = h-H*AG*xG;
+    KLower = 0;
+    KUpper = 1; 
 
     for rowIndex = 1:size(H,1)
         coefficient = coefficients(rowIndex);
         margin = margins(rowIndex);
-
+        
         if coefficient > 1e-12
-            kappaUpper = min(kappaUpper,margin/coefficient);
+            KUpper = min(KUpper,margin/coefficient);
         elseif coefficient < -1e-12
-            kappaLower = max(kappaLower,margin/coefficient);
+            KLower = max(KLower,margin/coefficient);
         elseif margin < -feasibilityTolerance
             error('RG infeasible at step %d: zero coefficient.',step);
         end
     end
 
-    if kappaLower > kappaUpper+feasibilityTolerance
-        error('No feasible kappa in [0,1] at step %d.',step);
+    if KLower > KUpper+feasibilityTolerance
+        error('No feasible K in [0,1] at step %d.',step);
     end
 
-    % Largest feasible kappa; numerical clipping to [0,1].
-    kappa = max(0,min(1,kappaUpper));
-    if kappa < kappaLower-feasibilityTolerance
-        error('Numerically infeasible kappa at step %d.',step);
+    % Largest feasible K; keeping it to interval --> [0,1].
+    K = max(0,min(1,KUpper));
+    if K < KLower-feasibilityTolerance
+        error('Numerically infeasible K at step %d.',step);
     end
 
-    xGnext = baseNext+direction*kappa;
-    nextStateViolation(step) = max(H*xGnext-h);
-    if nextStateViolation(step) > feasibilityTolerance
+    xGnext = AG*xG+BG*K*(r-w);
+    nextStateCheck(step) = max(H*xGnext-h);
+    if nextStateCheck(step) > feasibilityTolerance
         error('Next augmented state violates O_inf* at step %d.',step);
     end
 
-    kappaHistory(step) = kappa;
+    KHistory(step) = K;
     xG = xGnext;
     augmentedHistory(:,step+1) = xG;
 end
 outputHistory(:,end) = CG*xG;
 
-% Physical constraints: x1, x2 and u are all included in y.
-physicalResidual = F*outputHistory-g;
-physicalConstraintViolation = max(physicalResidual(:));
 
-fprintf('\n===== DYNAMIC REFERENCE GOVERNOR =====\n');
-fprintf('Maximum O_inf* violation: %.3e\n',max(nextStateViolation));
-fprintf('Maximum physical constraint violation: %.3e\n', ...
-        physicalConstraintViolation);
-fprintf('Final desired reference: %.4f\n',desiredReference(end));
-fprintf('Final accepted reference: %.4f\n',augmentedHistory(1,end));
-fprintf('Final position: %.4f\n',augmentedHistory(2,end));
 
 Oinf.rg.time = time;
 Oinf.rg.desiredReference = desiredReference;
 Oinf.rg.augmentedHistory = augmentedHistory;
 Oinf.rg.outputHistory = outputHistory;
-Oinf.rg.kappaHistory = kappaHistory;
+Oinf.rg.KHistory = KHistory;
 
 %% 18. ONLY FIGURE: RG TRAJECTORY AND O_INF* CROSS-SECTIONS
 % Plot the RG trajectory together with the constant-reference cross-sections.
@@ -433,42 +419,4 @@ x2 = augmentedHistory(3,:);
 u = outputHistory(3,:);
 
 plotRGTimeEvolution(t,r,w,x1,x2,u,stateMax,stateMin, ...
-    inputMax,inputMin,kappaHistory);
-
-%%
-% NUMERICAL CONSTRAINT VERIFICATION
-
-
-tol = 1e-7;
-
-% Maximum violations (positive values mean violation)
-positionViolation = max([ ...
-    max(x1-stateMax(1)), ...
-    max(stateMin(1)-x1), 0]);
-
-velocityViolation = max([ ...
-    max(x2-stateMax(2)), ...
-    max(stateMin(2)-x2), 0]);
-
-inputViolation = max([ ...
-    max(u-inputMax), ...
-    max(inputMin-u), 0]);
-
-fprintf('\n====================================\n');
-fprintf('CONSTRAINT CHECK\n');
-fprintf('====================================\n');
-
-fprintf('Position constraint violation: %.3e\n', ...
-        positionViolation);
-
-fprintf('Velocity constraint violation: %.3e\n', ...
-        velocityViolation);
-
-fprintf('Input constraint violation: %.3e\n', ...
-        inputViolation);
-
-if max([positionViolation,velocityViolation,inputViolation]) <= tol
-    fprintf('All physical constraints are satisfied.\n');
-else
-    fprintf('WARNING: Physical constraint violation detected.\n');
-end
+    inputMax,inputMin,KHistory);
