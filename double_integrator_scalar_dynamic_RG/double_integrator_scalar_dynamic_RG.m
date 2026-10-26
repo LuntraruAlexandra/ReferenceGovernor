@@ -35,25 +35,37 @@ close all;
 % A dynamic scalar Reference Governor is implemented after the O_inf* computation.
 %% 
 
-%% 1. DISCRETE-TIME DOUBLE-INTEGRATOR MODEL
+%% 1. DISCRETE-TIME DOUBLE-INTEGRATOR MODEL 
 
-Ts = 0.1;
 
-% Model used in the paper's example:
+% Model used in the paper's example [3]:
 % x1(k+1) = x1(k) + 0.1*x2(k)
 % x2(k+1) = x2(k) + 0.1*u(k)
-Ad = [1 Ts;
+Ts = 0.1;
+
+
+Ad = [1 0.1;
       0 1];
 Bd = [0;
-      Ts];
+      0.1];
+[n,m]= size(Bd);
 
-%% 2. CONTROLLER GIVEN IN THE PAPER
 
-% u(k) = 0.9170*(v(k)-x1(k)) - 1.6821*x2(k)
+%% 2. CONTROLLER 
+
+% u(k) = 0.9170*(v(k)-x1(k)) - 1.6821*x2(k)--> this is from the paper
 % Equivalently: u(k) = -K*x(k) + K(1)*v(k)
-Kd = [0.9170 1.6821];
+
+% Tests were also done with this controller:
+% Kd = [0.9170 1.6821]; --> from the paper
 
 % Closed-loop dynamics: x(k+1) = Ah*x(k) + Bh*v(k)
+
+Q = 10 * eye(n)
+R = 2 * eye(m);
+
+
+Kd = dlqr(Ad,Bd,Q,R)
 Ah = Ad - Bd*Kd;
 Bh = Bd*Kd(1);
 
@@ -62,17 +74,13 @@ Bh = Bd*Kd(1);
 n = size(Ah,1);
 m = size(Bh,2);
 
-assert(size(Ah,2) == n, 'Ah must be square.');
-assert(size(Bh,1) == n, 'Bh must have n rows.');
-
-closedLoopEigenvalues = eig(Ah);
-
-disp('Controller gain K from the paper:'); disp(Kd);
+eigenvalues = eig(Ah);
+disp('LQR controller gain:'); disp(Kd);
 disp('Matrix Ah:'); disp(Ah);
 disp('Matrix Bh:'); disp(Bh);
-disp('Closed-loop eigenvalues:'); disp(closedLoopEigenvalues);
+disp('Closed-loop eigenvalues:'); disp(eigenvalues);
 
-if any(abs(closedLoopEigenvalues) >= 1)
+if any(abs(eigenvalues) >= 1)
     error('The closed-loop system is not Schur stable.');
 end
 
@@ -85,6 +93,9 @@ inputMin = -0.1;
 inputMax =  0.1;
 
 % Constrained output: y = [x1; x2; u] = Ch*x + Dh*v
+
+% u = -Kd * x + Kd(1)*v
+
 % y was chosen to contain all constraints
 Ch = [eye(n);
       -Kd];
